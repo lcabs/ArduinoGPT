@@ -3,6 +3,9 @@
 #include <EthernetClient.h>
 #include <PubSubClient.h>
 #include <SD.h>
+#include <Time.h>
+#include <EthernetUdp.h>
+#include <NTPClient.h>
 
 // Define the MAC address, IP address, and MQTT broker details
 byte mac[] = {0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02};
@@ -10,16 +13,27 @@ IPAddress ip(192, 168, 0, 105);
 const char* mqtt_server = "broker.hivemq.com";
 const int mqtt_port = 1883;
 const char* mqtt_topic = "lcabs1993/arduino";
+const char* mqtt_topic_sala = "lcabs1993/sala";
+const char* mqtt_topic_escritorio = "lcabs1993/escritorio";
+const char* mqtt_topic_quarto = "lcabs1993/quarto";
 
 EthernetClient ethClient;
 PubSubClient client(ethClient);
 
 const int buzzerPin = 8; // Changed to pin 8
 const int outputPin = 11; // Set as an output with initial LOW state
+const int clappingSensorPin = 2; // Modify to the actual pin you're using for the sensor
 
 // SD card
 const int chipSelect = 4; // Change this to your SD card's chip select pin
 File dataFile;
+
+// NTP
+EthernetUDP udp;
+NTPClient ntpClient(udp, "pool.ntp.org", -3 * 3600, 60000); // GMT -3
+
+bool clapDetected = false;
+unsigned long lastPayloadTime = 0;
 
 void setup() {
   // Start Serial communication
@@ -39,6 +53,9 @@ void setup() {
   pinMode(outputPin, OUTPUT);
   digitalWrite(outputPin, LOW); // Set the output pin to initial LOW state
 
+  // Initialize the clapping sensor pin as an input
+  pinMode(clappingSensorPin, INPUT);
+
   // Initialize the SD card
   if (SD.begin(chipSelect)) {
     Serial.println("SD card initialized.");
@@ -49,9 +66,8 @@ void setup() {
     return;
   }
 
-  // Connect to MQTT broker
+  // Connect to MQTT broker and subscribe to topics
   connectToMqtt();
-  client.subscribe(mqtt_topic);
 }
 
 void loop() {
@@ -70,6 +86,24 @@ void loop() {
         delay(500); // Delay between beeps
       }
     }
+  }
+
+  // Update NTP client
+  ntpClient.update();
+
+  // Check for clapping sensor input
+  int sensorValue = digitalRead(clappingSensorPin);
+  if (sensorValue == HIGH) {
+    // Clap detected, generate a short beep (active HIGH)
+    beepBuzzer();
+    clapDetected = true;
+  }
+
+  // Check if a payload with "salaoff" was received
+  if (clapDetected && (millis() - lastPayloadTime) <= 10000) {
+    // Within 10 seconds of receiving "salaoff," publish "salaon" to topic "lcabs1993/sala"
+    client.publish(mqtt_topic_sala, "salaon");
+    clapDetected = false; // Reset clap detection
   }
 }
 
@@ -92,9 +126,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   beepBuzzer();
 
   // Get the current timestamp
-  unsigned long currentTime = millis();
-  char timestamp[20];
-  snprintf(timestamp, sizeof(timestamp), "[%lu] ", currentTime);
+  lastPayloadTime = millis();
 
   Serial.print("Payload: ");
   for (int i = 0; i < length; i++) {
@@ -105,6 +137,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   // Write the payload and timestamp to the SD card
   dataFile = SD.open("mqtt_log.txt", FILE_WRITE);
   if (dataFile) {
+    char timestamp[20];
+    snprintf(timestamp, sizeof(timestamp), "[%lu] ", lastPayloadTime);
     dataFile.print(timestamp);
     dataFile.print("Topic: ");
     dataFile.println(topic);
@@ -124,6 +158,10 @@ void connectToMqtt() {
     Serial.println("Connecting to MQTT...");
     if (client.connect("ArduinoClient")) {
       Serial.println("Connected to MQTT");
+      // Subscribe to additional topics
+      client.subscribe(mqtt_topic_sala);
+      client.subscribe(mqtt_topic_escritorio);
+      client.subscribe(mqtt_topic_quarto);
     } else {
       Serial.print("Failed, rc=");
       Serial.print(client.state());
